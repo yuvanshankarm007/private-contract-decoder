@@ -24,7 +24,7 @@ else:
 
 # 2. GOOGLE SETUP (Fixed for new 'google-genai' library)
 google_key = os.environ.get("GOOGLE_API_KEY")
-if google_key and google_key.startswith("AIza"):
+if google_key:
     client_google = genai.Client(api_key=google_key)
     print("✅ Google API Key loaded successfully")
 else:
