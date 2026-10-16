@@ -2,7 +2,6 @@ import os
 import tempfile
 import gradio as gr
 from groq import Groq
-from dotenv import load_dotenv
 from pypdf import PdfReader
 from docx import Document
 from google import genai
@@ -12,35 +11,34 @@ import sentry_sdk
 # ==========================================
 # 1. INITIALIZATION & ENVIRONMENT
 # ==========================================
-load_dotenv()
+# Note: load_dotenv() is skipped because Render uses real Environment Variables
 
-# Initialize Sentry
-sentry_sdk.init(
-    dsn=os.environ.get("SENTRY_DSN"),
-    traces_sample_rate=1.0,
-    profiles_sample_rate=1.0
-)
+# 1. GROQ SETUP
+groq_key = os.environ.get("GROQ_API_KEY")
+if groq_key and groq_key.startswith("gsk_"):
+    client_groq = Groq(api_key=groq_key)
+    print("✅ Groq API Key loaded successfully")
+else:
+    print("❌ WARNING: GROQ_API_KEY is missing or invalid!")
+    client_groq = None
 
-# Initialize Groq
-try:
-    client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-    print("✅ Groq Connected")
-except Exception as e:
-    print(f"❌ Groq Error: {e}")
+# 2. GOOGLE SETUP (Fixed for new 'google-genai' library)
+google_key = os.environ.get("GOOGLE_API_KEY")
+if google_key and google_key.startswith("AIza"):
+    client_google = genai.Client(api_key=google_key)
+    print("✅ Google API Key loaded successfully")
+else:
+    print(" WARNING: GOOGLE_API_KEY is missing or invalid!")
+    client_google = None
 
-# Initialize Gemma (New Google GenAI syntax)
-try:
-    client_google = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY"))
-    print("✅ Gemma Connected")
-except Exception as e:
-    print(f"❌ Gemma Error: {e}")
-
-# Initialize ElevenLabs (New Client syntax)
-try:
-    client_eleven = ElevenLabs(api_key=os.environ.get("ELEVENLABS_API_KEY"))
-    print("✅ ElevenLabs Connected")
-except Exception as e:
-    print(f"❌ ElevenLabs Error: {e}")
+# 3. ELEVENLABS SETUP
+eleven_key = os.environ.get("ELEVENLABS_API_KEY")
+if eleven_key and eleven_key.startswith("sk_"):
+    client_eleven = ElevenLabs(api_key=eleven_key)
+    print("✅ ElevenLabs API Key loaded successfully")
+else:
+    print("❌ WARNING: ELEVENLABS_API_KEY is missing or invalid!")
+    client_eleven = None
 
 # ==========================================
 # 2. HELPER FUNCTIONS
@@ -71,13 +69,11 @@ def create_export_file(analysis, email, score):
         return f.name
 
 def generate_audio(text):
-    if not text or "Router" in text or "Failed" in text:
+    if not text or "Router" in text or "Failed" in text or client_eleven is None:
         return None
     try:
-        # Modern ElevenLabs syntax
         audio = client_eleven.generate(text=text, voice="Rachel", model="eleven_multilingual_v2")
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
-            # audio is an iterator of bytes in newer versions
             for chunk in audio:
                 f.write(chunk)
             return f.name
@@ -98,29 +94,40 @@ def process_contract(uploaded_file, text_input, user_role):
     if not contract_text:
         return "⚠️ Please upload a file or paste text.", "No text provided.", "N/A", None
 
-    # --- ROUTER 1: DEEP MODE ---
+    # --- ROUTER 1: DEEP MODE (Fixed Model Name) ---
     deep_prompt = f"You are an expert legal assistant. Analyze this contract for a {user_role}. Identify red flags, hidden fees, unfair clauses. Use bullet points and emojis.\n\nText:\n{contract_text}"
     try:
-        res1 = client_groq.chat.completions.create(model="openai/gpt-oss-120b", messages=[{"role": "user", "content": deep_prompt}], temperature=0.3)
+        if client_groq is None: raise ValueError("Groq client not initialized")
+        res1 = client_groq.chat.completions.create(
+            model="llama3-70b-8192", 
+            messages=[{"role": "user", "content": deep_prompt}], 
+            temperature=0.3
+        )
         red_flags = res1.choices[0].message.content
     except Exception as e:
         red_flags = f"❌ Router 1 Failed: {e}"
 
-    # --- ROUTER 2: SPEED MODE ---
+    # --- ROUTER 2: SPEED MODE (Fixed Model Name) ---
     speed_prompt = f"Based on these red flags: {red_flags}\n\nDraft a short, polite, professional email to the other party negotiating these points. Do not sound aggressive."
     try:
-        res2 = client_groq.chat.completions.create(model="qwen/qwen3.8-27b", messages=[{"role": "user", "content": speed_prompt}], temperature=0.5)
+        if client_groq is None: raise ValueError("Groq client not initialized")
+        res2 = client_groq.chat.completions.create(
+            model="llama3-8b-8192", 
+            messages=[{"role": "user", "content": speed_prompt}], 
+            temperature=0.5
+        )
         email_draft = res2.choices[0].message.content
     except Exception as e:
         email_draft = f"❌ Router 2 Failed: {e}"
 
-    # --- ROUTER 3: GEMMA PRIVACY SCORE (New Syntax) ---
+    # --- ROUTER 3: GEMINI PRIVACY SCORE (Fixed Syntax) ---
     try:
+        if client_google is None: raise ValueError("Google client not initialized")
         score_prompt = f"Rate the privacy risk of this contract from 1 (Safe) to 10 (Highly Predatory). Reply ONLY with the number.\n\n{contract_text}"
         res3 = client_google.models.generate_content(model='gemini-1.5-flash', contents=score_prompt)
-        privacy_score = f"🔒 Gemma Privacy Risk Score: {res3.text.strip()}/10"
+        privacy_score = f" Gemini Privacy Risk Score: {res3.text.strip()}/10"
     except Exception as e:
-        privacy_score = f"❌ Gemma Score Failed: {e}"
+        privacy_score = f"❌ Gemini Score Failed: {e}"
 
     export_path = create_export_file(red_flags, email_draft, privacy_score)
     return red_flags, email_draft, privacy_score, export_path
@@ -140,7 +147,7 @@ with gr.Blocks(title="Private Contract Decoder", theme=gr.themes.Soft()) as demo
             run_btn = gr.Button("🔍 Analyze & Draft", variant="primary")
             
         with gr.Column():
-            score_output = gr.Textbox(label="🔒 Gemma Privacy Score", lines=1)
+            score_output = gr.Textbox(label="🔒 Gemini Privacy Score", lines=1)
             deep_output = gr.Textbox(label="🧠 Router 1: Red Flags", lines=8)
             speed_output = gr.Textbox(label="✉️ Router 2: Email Draft", lines=8)
             export_output = gr.File(label="⬇️ Download Report (.txt)", interactive=False)
@@ -157,4 +164,4 @@ with gr.Blocks(title="Private Contract Decoder", theme=gr.themes.Soft()) as demo
 # ==========================================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
-    demo.launch(server_name="0.0.0.0", server_port=port, share=True)
+    demo.launch(server_name="0.0.0.0", server_port=port)
