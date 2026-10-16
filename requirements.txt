@@ -6,3 +6,4 @@ python-docx
 google-genai
 elevenlabs
 sentry-sdk
+gTTS
