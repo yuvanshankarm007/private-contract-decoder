@@ -2,52 +2,80 @@ import os
 import tempfile
 import gradio as gr
 from groq import Groq
+from dotenv import load_dotenv
 from pypdf import PdfReader
 from docx import Document
 from google import genai
 from elevenlabs.client import ElevenLabs
+from gtts import gTTS
 import sentry_sdk
 
 # ==========================================
 # 1. INITIALIZATION & ENVIRONMENT
 # ==========================================
-# Note: load_dotenv() is skipped because Render uses real Environment Variables
+load_dotenv()  # Only used for local testing; Render uses real env vars
 
-# 1. GROQ SETUP
+# Sentry error tracking (safe even if DSN is missing)
+sentry_dsn = os.environ.get("SENTRY_DSN")
+if sentry_dsn:
+    sentry_sdk.init(dsn=sentry_dsn, traces_sample_rate=1.0)
+    print("✅ Sentry connected")
+
+# GROQ
 groq_key = os.environ.get("GROQ_API_KEY")
-if groq_key and groq_key.startswith("gsk_"):
-    client_groq = Groq(api_key=groq_key)
-    print("✅ Groq API Key loaded successfully")
-else:
-    print("❌ WARNING: GROQ_API_KEY is missing or invalid!")
-    client_groq = None
+client_groq = Groq(api_key=groq_key) if groq_key else None
+print("✅ Groq key loaded" if client_groq else "❌ GROQ_API_KEY missing")
 
-# 2. GOOGLE SETUP (Fixed for new 'google-genai' library)
+# GOOGLE (Gemini) - accepts ANY key format, no prefix check
 google_key = os.environ.get("GOOGLE_API_KEY")
-if google_key:
-    client_google = genai.Client(api_key=google_key)
-    print("✅ Google API Key loaded successfully")
-else:
-    print(" WARNING: GOOGLE_API_KEY is missing or invalid!")
-    client_google = None
+client_google = genai.Client(api_key=google_key) if google_key else None
+print("✅ Google key loaded" if client_google else "❌ GOOGLE_API_KEY missing")
 
-# 3. ELEVENLABS SETUP
+# ELEVENLABS
 eleven_key = os.environ.get("ELEVENLABS_API_KEY")
-if eleven_key and eleven_key.startswith("sk_"):
-    client_eleven = ElevenLabs(api_key=eleven_key)
-    print("✅ ElevenLabs API Key loaded successfully")
-else:
-    print("❌ WARNING: ELEVENLABS_API_KEY is missing or invalid!")
-    client_eleven = None
+client_eleven = ElevenLabs(api_key=eleven_key) if eleven_key else None
+print("✅ ElevenLabs key loaded" if client_eleven else "⚠️ ElevenLabs missing (will use free gTTS fallback)")
+
+# SELF-HEALING MODEL ROUTERS: if a model is deprecated, try the next one automatically
+DEEP_MODELS = ["openai/gpt-oss-120b", "llama-3.3-70b-versatile", "meta-llama/llama-4-scout-17b-16e-instruct"]
+SPEED_MODELS = ["qwen/qwen3.8-27b", "llama-3.1-8b-instant", "openai/gpt-oss-20b"]
+GEMINI_MODELS = ["gemini-2.5-flash", "gemini-flash-latest", "gemini-2.0-flash"]
 
 # ==========================================
 # 2. HELPER FUNCTIONS
 # ==========================================
+def groq_chat(model_list, prompt, temperature):
+    """Tries each model in the list until one works."""
+    last_error = None
+    for model_name in model_list:
+        try:
+            res = client_groq.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature
+            )
+            return res.choices[0].message.content
+        except Exception as e:
+            last_error = e
+            continue
+    raise last_error
+
+def gemini_generate(prompt):
+    """Tries each Gemini model in the list until one works."""
+    last_error = None
+    for model_name in GEMINI_MODELS:
+        try:
+            res = client_google.models.generate_content(model=model_name, contents=prompt)
+            return res.text.strip()
+        except Exception as e:
+            last_error = e
+            continue
+    raise last_error
+
 def extract_text_from_file(file):
     if file is None: return ""
     file_path = file.name if hasattr(file, 'name') else file
     ext = file_path.split('.')[-1].lower()
-    
     try:
         if ext == 'pdf':
             reader = PdfReader(file_path)
@@ -69,16 +97,26 @@ def create_export_file(analysis, email, score):
         return f.name
 
 def generate_audio(text):
-    if not text or "Router" in text or "Failed" in text or client_eleven is None:
+    if not text or "Router" in text or "Failed" in text:
         return None
+    # Try ElevenLabs first (for the hackathon category)
+    if client_eleven:
+        try:
+            audio = client_eleven.generate(text=text, voice="Rachel", model="eleven_multilingual_v2")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
+                for chunk in audio:
+                    f.write(chunk)
+                return f.name
+        except Exception as e:
+            print(f"ElevenLabs failed ({e}), using free gTTS fallback")
+    # Free unlimited fallback so the demo NEVER breaks
     try:
-        audio = client_eleven.generate(text=text, voice="Rachel", model="eleven_multilingual_v2")
+        tts = gTTS(text=text, lang="en")
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
-            for chunk in audio:
-                f.write(chunk)
+            tts.save(f.name)
             return f.name
     except Exception as e:
-        print(f"ElevenLabs Error: {e}")
+        print(f"Audio error: {e}")
         return None
 
 # ==========================================
@@ -94,38 +132,27 @@ def process_contract(uploaded_file, text_input, user_role):
     if not contract_text:
         return "⚠️ Please upload a file or paste text.", "No text provided.", "N/A", None
 
-    # --- ROUTER 1: DEEP MODE (Fixed Model Name) ---
+    # --- ROUTER 1: DEEP ANALYSIS ---
     deep_prompt = f"You are an expert legal assistant. Analyze this contract for a {user_role}. Identify red flags, hidden fees, unfair clauses. Use bullet points and emojis.\n\nText:\n{contract_text}"
     try:
-        if client_groq is None: raise ValueError("Groq client not initialized")
-        res1 = client_groq.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": deep_prompt}], 
-            temperature=0.3
-        )
-        red_flags = res1.choices[0].message.content
+        if client_groq is None: raise ValueError("GROQ_API_KEY missing")
+        red_flags = groq_chat(DEEP_MODELS, deep_prompt, 0.3)
     except Exception as e:
         red_flags = f"❌ Router 1 Failed: {e}"
 
-    # --- ROUTER 2: SPEED MODE (Fixed Model Name) ---
+    # --- ROUTER 2: SPEED MODE EMAIL ---
     speed_prompt = f"Based on these red flags: {red_flags}\n\nDraft a short, polite, professional email to the other party negotiating these points. Do not sound aggressive."
     try:
-        if client_groq is None: raise ValueError("Groq client not initialized")
-        res2 = client_groq.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[{"role": "user", "content": speed_prompt}], 
-            temperature=0.5
-        )
-        email_draft = res2.choices[0].message.content
+        if client_groq is None: raise ValueError("GROQ_API_KEY missing")
+        email_draft = groq_chat(SPEED_MODELS, speed_prompt, 0.5)
     except Exception as e:
         email_draft = f"❌ Router 2 Failed: {e}"
 
-    # --- ROUTER 3: GEMINI PRIVACY SCORE (Fixed Syntax) ---
+    # --- ROUTER 3: GEMINI PRIVACY SCORE ---
     try:
-        if client_google is None: raise ValueError("Google client not initialized")
+        if client_google is None: raise ValueError("GOOGLE_API_KEY missing")
         score_prompt = f"Rate the privacy risk of this contract from 1 (Safe) to 10 (Highly Predatory). Reply ONLY with the number.\n\n{contract_text}"
-        res3 = client_google.models.generate_content(model='gemini-1.5-flash', contents=score_prompt)
-        privacy_score = f" Gemini Privacy Risk Score: {res3.text.strip()}/10"
+        privacy_score = f"🔒 Gemini Privacy Risk Score: {gemini_generate(score_prompt)}/10"
     except Exception as e:
         privacy_score = f"❌ Gemini Score Failed: {e}"
 
@@ -138,20 +165,20 @@ def process_contract(uploaded_file, text_input, user_role):
 with gr.Blocks(title="Private Contract Decoder", theme=gr.themes.Soft()) as demo:
     gr.Markdown("# 🛡️ Private Contract & Lease Decoder")
     gr.Markdown("Upload a file or paste text. Get AI analysis, a negotiation email, and a privacy score. **100% Private.**")
-    
+
     with gr.Row():
         with gr.Column():
             role_dropdown = gr.Dropdown(["Freelancer", "Tenant", "Small Business Owner"], label="Select Your Role", value="Freelancer")
             file_input = gr.File(label="Upload Contract (PDF, DOCX, TXT)", file_types=['.pdf', '.docx', '.txt'])
             text_input = gr.Textbox(label="Or Paste Text Here", lines=5)
             run_btn = gr.Button("🔍 Analyze & Draft", variant="primary")
-            
+
         with gr.Column():
             score_output = gr.Textbox(label="🔒 Gemini Privacy Score", lines=1)
             deep_output = gr.Textbox(label="🧠 Router 1: Red Flags", lines=8)
             speed_output = gr.Textbox(label="✉️ Router 2: Email Draft", lines=8)
             export_output = gr.File(label="⬇️ Download Report (.txt)", interactive=False)
-            
+
     with gr.Row():
         speak_btn = gr.Button("🔊 Read Email Aloud (ElevenLabs)", variant="secondary")
         audio_output = gr.Audio(label="Audio Draft", type="filepath", autoplay=False)
