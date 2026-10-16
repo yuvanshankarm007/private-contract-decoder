@@ -1,4 +1,20 @@
+"""
+Private Contract & Lease Decoder
+Hacktoberfest 2026 (#hf26challenge #hacktoberfest)
+
+Architecture:
+  - Router 1 (Groq, deep):   red-flag legal analysis
+  - Router 2 (Groq, speed):  negotiation email draft
+  - Router 3 (Gemma 4):      privacy risk score (Gemini + Groq fallbacks)
+  All three fire in parallel threads with hard timeouts and a 10s score budget.
+  Self-healing model chains hop automatically across deprecated/congested models.
+  Results are cached; providers are warmed at boot; audio falls back to free gTTS.
+
+Categories: Best Use of Gemma / Render / ElevenLabs / Sentry / GitHub Copilot
+"""
+
 import os
+import re
 import time
 import tempfile
 import threading
@@ -19,43 +35,38 @@ import sentry_sdk
 # ==========================================
 load_dotenv()  # Only for local testing; Render uses real env vars
 
+MAX_CONTRACT_CHARS = 12000
+
 sentry_dsn = os.environ.get("SENTRY_DSN")
 if sentry_dsn:
     sentry_sdk.init(dsn=sentry_dsn, traces_sample_rate=1.0)
     print("✅ Sentry connected")
 
 groq_key = os.environ.get("GROQ_API_KEY")
-client_groq = Groq(api_key=groq_key) if groq_key else None
+client_groq = Groq(api_key=groq_key, timeout=10.0, max_retries=1) if groq_key else None
 print("✅ Groq key loaded" if client_groq else "❌ GROQ_API_KEY missing")
 
 google_key = os.environ.get("GOOGLE_API_KEY")
-client_google = genai.Client(api_key=google_key) if google_key else None
+client_google = genai.Client(api_key=google_key, http_options=types.HttpOptions(timeout=8000)) if google_key else None
 print("✅ Google key loaded" if client_google else "❌ GOOGLE_API_KEY missing")
 
 eleven_key = os.environ.get("ELEVENLABS_API_KEY")
 client_eleven = ElevenLabs(api_key=eleven_key) if eleven_key else None
 print("✅ ElevenLabs key loaded" if client_eleven else "⚠️ ElevenLabs missing (free gTTS fallback active)")
 
-# SELF-HEALING MODEL ROUTERS (fast models first, smart models as fallback)
+# SELF-HEALING MODEL ROUTERS (fast first, smart fallbacks; names verified live)
 DEEP_MODELS = ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "llama-3.3-70b-versatile"]
 SPEED_MODELS = ["llama-3.1-8b-instant", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"]
 GEMMA_MODELS = ["gemma-4-26b-a4b-it", "gemma-4-31b-it"]  # HACKATHON CATEGORY MODELS
-GEMINI_MODELS = [
-    "gemini-3.8-flash",
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
-    "gemini-3.5-flash",
-    "gemini-flash-latest",
-    "gemini-3.1-flash-lite",
-    "gemini-flash-lite-latest",
-]
+GEMINI_MODELS = ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"]
 
-_RESPONSE_CACHE = {}  # same contract + role again = instant answer
+_RESPONSE_CACHE = {}
 
 # ==========================================
 # 2. HELPER FUNCTIONS
 # ==========================================
 def groq_chat(model_list, prompt, temperature, max_tokens=None):
+    """Tries each Groq model until one works."""
     last_error = None
     for model_name in model_list:
         try:
@@ -72,6 +83,7 @@ def groq_chat(model_list, prompt, temperature, max_tokens=None):
     raise last_error
 
 def _extract_text(resp):
+    """Extracts visible text from a Google response; '' if none (never dumps repr)."""
     txt = getattr(resp, "text", None)
     if txt:
         return txt.strip()
@@ -88,41 +100,12 @@ def _extract_text(resp):
                     chunks.append(t)
         if chunks:
             return "\n".join(chunks).strip()
-    return str(resp).strip()
+    return ""
 
-def gemma_score(prompt):
-    """Gemma 4 = the hackathon category model. Tiny output = tiny latency."""
-    if client_google is None:
-        raise ValueError("GOOGLE_API_KEY missing")
-    last_error = None
-    for model_name in GEMMA_MODELS:
-        try:
-            resp = client_google.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(max_output_tokens=16, temperature=0.0)
-            )
-            return _extract_text(resp)
-        except Exception as e:
-            last_error = e
-    raise last_error
-
-def gemini_generate(prompt):
-    if client_google is None:
-        raise ValueError("GOOGLE_API_KEY missing")
-    last_error = None
-    for model_name in GEMINI_MODELS:
-        for attempt in range(2):
-            try:
-                resp = client_google.models.generate_content(model=model_name, contents=prompt)
-                return _extract_text(resp)
-            except Exception as e:
-                last_error = e
-                if "503" in str(e) or "UNAVAILABLE" in str(e):
-                    time.sleep(1.5)
-                    continue
-                break
-    raise last_error
+def _clean_score(raw):
+    """Pulls a single 1-10 digit out of any model reply."""
+    m = re.search(r'\b(10|[1-9])\b', raw or "")
+    return m.group(1) if m else None
 
 def extract_text_from_file(file):
     if file is None: return ""
@@ -170,7 +153,7 @@ def generate_audio(text):
         return None
 
 # ==========================================
-# 3. MAIN PROCESSING (PARALLEL + CACHED = FAST)
+# 3. ROUTERS (PARALLEL + DEADLINED + CACHED)
 # ==========================================
 def _safe(fn, label):
     def wrapper(*args):
@@ -191,12 +174,33 @@ def _run_router2(contract_text, user_role):
     return groq_chat(SPEED_MODELS, speed_prompt, 0.5, max_tokens=250)
 
 def _run_router3(contract_text):
+    """Gemma first (category), hop instantly on failure, 10s hard budget, Groq safety net."""
     score_prompt = f"Rate the privacy risk of this contract from 1 (Safe) to 10 (Highly Predatory). Reply ONLY with the number.\n\n{contract_text}"
-    for label, fn in [("Gemma", gemma_score), ("Gemini", gemini_generate), ("Groq", lambda p: groq_chat(SPEED_MODELS, p, 0.0, max_tokens=5))]:
-        try:
-            return f"🔒 {label} Privacy Risk Score: {fn(score_prompt).strip()}/10"
-        except Exception as e:
-            print(f"Score via {label} failed: {e}")
+    if client_google:
+        deadline = time.time() + 10
+        for label, models in [("Gemma", GEMMA_MODELS), ("Gemini", GEMINI_MODELS)]:
+            for model_name in models:
+                if time.time() > deadline:
+                    break
+                try:
+                    resp = client_google.models.generate_content(
+                        model=model_name,
+                        contents=score_prompt,
+                        config=types.GenerateContentConfig(max_output_tokens=1024, temperature=0.0)
+                    )
+                    num = _clean_score(_extract_text(resp))
+                    if not num:
+                        raise ValueError("model returned no usable number")
+                    return f"🔒 {label} Privacy Risk Score: {num}/10"
+                except Exception as e:
+                    print(f"{label}/{model_name} failed: {e}")
+                    continue
+    try:
+        num = _clean_score(groq_chat(SPEED_MODELS, score_prompt, 0.0, max_tokens=5))
+        if num:
+            return f"🔒 Groq Privacy Risk Score: {num}/10"
+    except Exception as e:
+        print(f"Groq score failed: {e}")
     return "❌ Score Failed: all providers unavailable"
 
 @sentry_sdk.trace
@@ -204,18 +208,16 @@ def process_contract(uploaded_file, text_input, user_role):
     contract_text = ""
     if uploaded_file: contract_text += extract_text_from_file(uploaded_file)
     if text_input: contract_text += "\n" + text_input
-    contract_text = contract_text.strip()
+    contract_text = contract_text.strip()[:MAX_CONTRACT_CHARS]
 
     if not contract_text:
         return "⚠️ Please upload a file or paste text.", "No text provided.", "N/A", None
 
-    # CACHE HIT = instant
     cache_key = (contract_text, user_role)
     if cache_key in _RESPONSE_CACHE:
         red_flags, email_draft, privacy_score = _RESPONSE_CACHE[cache_key]
         print("⚡ Cache hit - instant response")
     else:
-        # Fire all 3 routers SIMULTANEOUSLY
         with ThreadPoolExecutor(max_workers=3) as ex:
             f1 = ex.submit(_safe(_run_router1, "Router 1"), contract_text, user_role)
             f2 = ex.submit(_safe(_run_router2, "Router 2"), contract_text, user_role)
@@ -223,13 +225,15 @@ def process_contract(uploaded_file, text_input, user_role):
             red_flags = f1.result()
             email_draft = f2.result()
             privacy_score = f3.result()
+        if len(_RESPONSE_CACHE) > 32:
+            _RESPONSE_CACHE.pop(next(iter(_RESPONSE_CACHE)))
         _RESPONSE_CACHE[cache_key] = (red_flags, email_draft, privacy_score)
 
     export_path = create_export_file(red_flags, email_draft, privacy_score)
     return red_flags, email_draft, privacy_score, export_path
 
 # ==========================================
-# 4. STARTUP WARM-UP (kills first-click latency)
+# 4. STARTUP WARM-UP (bounded by client timeouts)
 # ==========================================
 def _warmup():
     try:
@@ -239,18 +243,19 @@ def _warmup():
         pass
     try:
         if client_google:
-            gemma_score("Reply with only the number 1")
+            client_google.models.generate_content(model=GEMMA_MODELS[0], contents="Reply 1", config=types.GenerateContentConfig(max_output_tokens=64))
     except Exception:
         pass
 
 threading.Thread(target=_warmup, daemon=True).start()
 
 # ==========================================
-# 5. GRADIO UI SETUP
+# 5. GRADIO UI
 # ==========================================
 with gr.Blocks(title="Private Contract Decoder", theme=gr.themes.Soft()) as demo:
     gr.Markdown("# 🛡️ Private Contract & Lease Decoder")
     gr.Markdown("Upload a file or paste text. Get AI analysis, a negotiation email, and a privacy score. **100% Private.**")
+    gr.Markdown("⚖️ Educational tool — not legal advice.")
 
     with gr.Row():
         with gr.Column():
@@ -277,4 +282,4 @@ with gr.Blocks(title="Private Contract Decoder", theme=gr.themes.Soft()) as demo
 # ==========================================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 7860))
-    demo.launch(server_name="0.0.0.0", server_port=port)
+    demo.launch(server_name="0.0.0.0", server_port=port, show_api=False)
