@@ -13,39 +13,33 @@ import sentry_sdk
 # ==========================================
 # 1. INITIALIZATION & ENVIRONMENT
 # ==========================================
-load_dotenv()  # Only used for local testing; Render uses real env vars
+load_dotenv()  # Only for local testing; Render uses real env vars
 
-# Sentry error tracking (safe even if DSN is missing)
 sentry_dsn = os.environ.get("SENTRY_DSN")
 if sentry_dsn:
     sentry_sdk.init(dsn=sentry_dsn, traces_sample_rate=1.0)
     print("✅ Sentry connected")
 
-# GROQ
 groq_key = os.environ.get("GROQ_API_KEY")
 client_groq = Groq(api_key=groq_key) if groq_key else None
 print("✅ Groq key loaded" if client_groq else "❌ GROQ_API_KEY missing")
 
-# GOOGLE (Gemini) - accepts ANY key format, no prefix check
 google_key = os.environ.get("GOOGLE_API_KEY")
 client_google = genai.Client(api_key=google_key) if google_key else None
 print("✅ Google key loaded" if client_google else "❌ GOOGLE_API_KEY missing")
 
-# ELEVENLABS
 eleven_key = os.environ.get("ELEVENLABS_API_KEY")
 client_eleven = ElevenLabs(api_key=eleven_key) if eleven_key else None
-print("✅ ElevenLabs key loaded" if client_eleven else "⚠️ ElevenLabs missing (will use free gTTS fallback)")
+print("✅ ElevenLabs key loaded" if client_eleven else "⚠️ ElevenLabs missing (free gTTS fallback active)")
 
-# SELF-HEALING MODEL ROUTERS: if a model is deprecated, try the next one automatically
+# SELF-HEALING MODEL ROUTERS
 DEEP_MODELS = ["openai/gpt-oss-120b", "llama-3.3-70b-versatile", "meta-llama/llama-4-scout-17b-16e-instruct"]
 SPEED_MODELS = ["qwen/qwen3.8-27b", "llama-3.1-8b-instant", "openai/gpt-oss-20b"]
-GEMINI_MODELS = ["gemini-3.8-flash", "gemini-flash-latest", "gemini-2.5-flash"]
 
 # ==========================================
 # 2. HELPER FUNCTIONS
 # ==========================================
 def groq_chat(model_list, prompt, temperature):
-    """Tries each model in the list until one works."""
     last_error = None
     for model_name in model_list:
         try:
@@ -60,13 +54,42 @@ def groq_chat(model_list, prompt, temperature):
             continue
     raise last_error
 
+def _extract_text(resp):
+    """Works with BOTH the new Interactions API and old generate_content."""
+    txt = getattr(resp, "text", None)
+    if txt:
+        return txt.strip()
+    txt = getattr(resp, "output_text", None)
+    if txt:
+        return txt.strip()
+    out = getattr(resp, "output", None)
+    if out:
+        chunks = []
+        for item in out:
+            for part in (getattr(item, "content", None) or []):
+                t = getattr(part, "text", None)
+                if t:
+                    chunks.append(t)
+        if chunks:
+            return "\n".join(chunks).strip()
+    return str(resp).strip()
+
 def gemini_generate(prompt):
-    """Tries each Gemini model in the list until one works."""
+    """Tries the NEW Interactions API (Gemini 3.x), then falls back to old method."""
     last_error = None
-    for model_name in GEMINI_MODELS:
+    # 1) New Interactions API — required for Gemini 3.x models
+    for model_name in ["gemini-3.8-flash", "gemini-3-flash"]:
         try:
-            res = client_google.models.generate_content(model=model_name, contents=prompt)
-            return res.text.strip()
+            resp = client_google.interactions.create(model=model_name, input=prompt)
+            return _extract_text(resp)
+        except Exception as e:
+            last_error = e
+            continue
+    # 2) Old generate_content method — for older models
+    for model_name in ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"]:
+        try:
+            resp = client_google.models.generate_content(model=model_name, contents=prompt)
+            return _extract_text(resp)
         except Exception as e:
             last_error = e
             continue
@@ -99,7 +122,6 @@ def create_export_file(analysis, email, score):
 def generate_audio(text):
     if not text or "Router" in text or "Failed" in text:
         return None
-    # Try ElevenLabs first (for the hackathon category)
     if client_eleven:
         try:
             audio = client_eleven.generate(text=text, voice="Rachel", model="eleven_multilingual_v2")
@@ -109,7 +131,6 @@ def generate_audio(text):
                 return f.name
         except Exception as e:
             print(f"ElevenLabs failed ({e}), using free gTTS fallback")
-    # Free unlimited fallback so the demo NEVER breaks
     try:
         tts = gTTS(text=text, lang="en")
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
@@ -132,7 +153,6 @@ def process_contract(uploaded_file, text_input, user_role):
     if not contract_text:
         return "⚠️ Please upload a file or paste text.", "No text provided.", "N/A", None
 
-    # --- ROUTER 1: DEEP ANALYSIS ---
     deep_prompt = f"You are an expert legal assistant. Analyze this contract for a {user_role}. Identify red flags, hidden fees, unfair clauses. Use bullet points and emojis.\n\nText:\n{contract_text}"
     try:
         if client_groq is None: raise ValueError("GROQ_API_KEY missing")
@@ -140,7 +160,6 @@ def process_contract(uploaded_file, text_input, user_role):
     except Exception as e:
         red_flags = f"❌ Router 1 Failed: {e}"
 
-    # --- ROUTER 2: SPEED MODE EMAIL ---
     speed_prompt = f"Based on these red flags: {red_flags}\n\nDraft a short, polite, professional email to the other party negotiating these points. Do not sound aggressive."
     try:
         if client_groq is None: raise ValueError("GROQ_API_KEY missing")
@@ -148,7 +167,6 @@ def process_contract(uploaded_file, text_input, user_role):
     except Exception as e:
         email_draft = f"❌ Router 2 Failed: {e}"
 
-    # --- ROUTER 3: GEMINI PRIVACY SCORE ---
     try:
         if client_google is None: raise ValueError("GOOGLE_API_KEY missing")
         score_prompt = f"Rate the privacy risk of this contract from 1 (Safe) to 10 (Highly Predatory). Reply ONLY with the number.\n\n{contract_text}"
