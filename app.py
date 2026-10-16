@@ -117,7 +117,7 @@ def process_contract(uploaded_file, text_input, user_role):
     # --- ROUTER 3: GEMMA PRIVACY SCORE (New Syntax) ---
     try:
         score_prompt = f"Rate the privacy risk of this contract from 1 (Safe) to 10 (Highly Predatory). Reply ONLY with the number.\n\n{contract_text}"
-        res3 = client_google.models.generate_content(model='gemma-2-2b-it', contents=score_prompt)
+        res3 = client_google.models.generate_content(model='gemini-1.5-flash', contents=score_prompt)
         privacy_score = f"🔒 Gemma Privacy Risk Score: {res3.text.strip()}/10"
     except Exception as e:
         privacy_score = f"❌ Gemma Score Failed: {e}"
