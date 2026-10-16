@@ -39,7 +39,7 @@ print("✅ ElevenLabs key loaded" if client_eleven else "⚠️ ElevenLabs missi
 # SELF-HEALING MODEL ROUTERS: if a model is deprecated, try the next one automatically
 DEEP_MODELS = ["openai/gpt-oss-120b", "llama-3.3-70b-versatile", "meta-llama/llama-4-scout-17b-16e-instruct"]
 SPEED_MODELS = ["qwen/qwen3.8-27b", "llama-3.1-8b-instant", "openai/gpt-oss-20b"]
-GEMINI_MODELS = ["gemini-2.5-flash", "gemini-flash-latest", "gemini-2.0-flash"]
+GEMINI_MODELS = ["gemini-3.8-flash", "gemini-flash-latest", "gemini-2.5-flash"]
 
 # ==========================================
 # 2. HELPER FUNCTIONS
