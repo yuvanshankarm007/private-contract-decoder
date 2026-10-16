@@ -99,7 +99,7 @@ def process_contract(uploaded_file, text_input, user_role):
     try:
         if client_groq is None: raise ValueError("Groq client not initialized")
         res1 = client_groq.chat.completions.create(
-            model="llama3-70b-8192", 
+            model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": deep_prompt}], 
             temperature=0.3
         )
@@ -112,7 +112,7 @@ def process_contract(uploaded_file, text_input, user_role):
     try:
         if client_groq is None: raise ValueError("Groq client not initialized")
         res2 = client_groq.chat.completions.create(
-            model="llama3-8b-8192", 
+            model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": speed_prompt}], 
             temperature=0.5
         )
