@@ -24,9 +24,9 @@ client_groq = Groq(api_key=groq_key, timeout=10.0, max_retries=1) if groq_key el
 print("✅ Groq key loaded" if client_groq else "❌ GROQ_API_KEY missing")
 
 # --- 3. MODEL CONFIGURATION ---
+# Put Qwen first for better email drafting
 DEEP_MODELS = ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
-SPEED_MODELS = ["openai/gpt-oss-20b"]
-
+SPEED_MODELS = ["qwen/qwen3.8-27b", "openai/gpt-oss-20b"]
 # --- 4. CACHING ---
 _RESPONSE_CACHE = {}
 
@@ -71,8 +71,10 @@ def _run_router1(contract_text, user_role):
     return groq_chat(DEEP_MODELS, prompt, 0.3, max_tokens=450)
 
 def _run_router2(contract_text, user_role):
-    prompt = f"You are a professional negotiator. Read this {user_role} contract, pick the 2-3 most unfair terms, and draft a short, polite, professional email (under 150 words) asking to revise them. Do not sound aggressive.\n\nText:\n{contract_text}"
-    return groq_chat(SPEED_MODELS, prompt, 0.5, max_tokens=500)
+    # Truncate to 600 chars so the model doesn't get overwhelmed
+    short_context = contract_text[:600]
+    prompt = f"Write a short, polite email from a {user_role} to a client to negotiate unfair contract terms. Keep it under 80 words. Start with 'Subject: '.\n\nContext:\n{short_context}"
+    return groq_chat(SPEED_MODELS, prompt, 0.5, max_tokens=400)
 
 def _run_router3(contract_text):
     short_text = contract_text[:1500] 
