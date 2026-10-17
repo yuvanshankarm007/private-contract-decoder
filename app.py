@@ -56,8 +56,9 @@ print("✅ ElevenLabs key loaded" if client_eleven else "⚠️ ElevenLabs missi
 
 # SELF-HEALING MODEL ROUTERS (fast first, smart fallbacks; names verified live)
 # Live Groq models from the console
-DEEP_MODELS = ["gpt-oss-120b", "gpt-oss-20b"]
-SPEED_MODELS = ["gpt-oss-20b", "gpt-oss-120b"]
+# EXACT models from your Groq Console screenshot
+DEEP_MODELS = ["gpt-oss-120b"]
+SPEED_MODELS = ["gpt-oss-20b"]
 GEMINI_MODELS = ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"]
 
 _RESPONSE_CACHE = {}
