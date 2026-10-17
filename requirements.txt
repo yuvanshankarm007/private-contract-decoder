@@ -7,3 +7,6 @@ google-genai
 elevenlabs
 sentry-sdk
 gTTS
+PyPDF2
+python-docx
+gtts
