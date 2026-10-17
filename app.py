@@ -246,7 +246,7 @@ with gr.Blocks(title="Private Contract Decoder", theme=gr.themes.Soft()) as demo
             run_btn = gr.Button("🔍 Analyze & Draft", variant="primary")
 
         with gr.Column():
-            score_output = gr.Textbox(label="🔒 Gemma Privacy Score", lines=1)
+            score_output = gr.Textbox(label=" Privacy Risk Score", lines=1)
             deep_output = gr.Textbox(label="🧠 Router 1: Red Flags", lines=8)
             speed_output = gr.Textbox(label="✉️ Router 2: Email Draft", lines=8)
             export_output = gr.File(label="⬇️ Download Report (.txt)", interactive=False)
