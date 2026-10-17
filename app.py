@@ -47,7 +47,7 @@ client_groq = Groq(api_key=groq_key, timeout=10.0, max_retries=1) if groq_key el
 print("✅ Groq key loaded" if client_groq else "❌ GROQ_API_KEY missing")
 
 google_key = os.environ.get("GOOGLE_API_KEY")
-client_google = genai.Client(api_key=google_key, http_options=types.HttpOptions(timeout=8000)) if google_key else None
+client_google = genai.Client(api_key=google_key, http_options=types.HttpOptions(timeout=15000)) if google_key else None
 print("✅ Google key loaded" if client_google else "❌ GOOGLE_API_KEY missing")
 
 eleven_key = os.environ.get("ELEVENLABS_API_KEY")
