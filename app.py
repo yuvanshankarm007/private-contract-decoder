@@ -174,34 +174,15 @@ def _run_router2(contract_text, user_role):
     return groq_chat(SPEED_MODELS, speed_prompt, 0.5, max_tokens=250)
 
 def _run_router3(contract_text):
-    """Gemma first (category), hop instantly on failure, 10s hard budget, Groq safety net."""
+    """Pure Groq scoring for maximum speed."""
     score_prompt = f"Rate the privacy risk of this contract from 1 (Safe) to 10 (Highly Predatory). Reply ONLY with the number.\n\n{contract_text}"
-    if client_google:
-        deadline = time.time() + 10
-        for label, models in [("Gemma", GEMMA_MODELS), ("Gemini", GEMINI_MODELS)]:
-            for model_name in models:
-                if time.time() > deadline:
-                    break
-                try:
-                    resp = client_google.models.generate_content(
-                        model=model_name,
-                        contents=score_prompt,
-                        config=types.GenerateContentConfig(max_output_tokens=1024, temperature=0.0)
-                    )
-                    num = _clean_score(_extract_text(resp))
-                    if not num:
-                        raise ValueError("model returned no usable number")
-                    return f"🔒 {label} Privacy Risk Score: {num}/10"
-                except Exception as e:
-                    print(f"{label}/{model_name} failed: {e}")
-                    continue
     try:
         num = _clean_score(groq_chat(SPEED_MODELS, score_prompt, 0.0, max_tokens=5))
         if num:
-            return f"🔒 Groq Privacy Risk Score: {num}/10"
+            return f"🔒 Privacy Risk Score: {num}/10"
     except Exception as e:
-        print(f"Groq score failed: {e}")
-    return "❌ Score Failed: all providers unavailable"
+        print(f"Score failed: {e}")
+    return "❌ Score Failed"
 
 @sentry_sdk.trace
 def process_contract(uploaded_file, text_input, user_role):
