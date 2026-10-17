@@ -55,10 +55,8 @@ client_eleven = ElevenLabs(api_key=eleven_key) if eleven_key else None
 print("✅ ElevenLabs key loaded" if client_eleven else "⚠️ ElevenLabs missing (free gTTS fallback active)")
 
 # SELF-HEALING MODEL ROUTERS (fast first, smart fallbacks; names verified live)
-# Live Groq models from the console
-# EXACT models from your Groq Console screenshot
-DEEP_MODELS = ["gpt-oss-120b"]
-SPEED_MODELS = ["gpt-oss-20b"]
+DEEP_MODELS = ["llama3-70b-8192"]
+SPEED_MODELS = ["llama3-8b-8192"]
 GEMINI_MODELS = ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"]
 
 _RESPONSE_CACHE = {}
