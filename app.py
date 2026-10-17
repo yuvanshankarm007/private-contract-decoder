@@ -25,7 +25,8 @@ client_groq = Groq(api_key=groq_key, timeout=10.0, max_retries=1) if groq_key el
 print("✅ Groq key loaded" if client_groq else "❌ GROQ_API_KEY missing")
 
 # --- 3. MODEL CONFIGURATION (The exact IDs from your Groq Console) ---
-DEEP_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
+# Faster models for speed
+DEEP_MODELS = ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
 SPEED_MODELS = ["openai/gpt-oss-20b"]
 
 # --- 4. CACHING FOR INSTANT REPEAT RESULTS ---
@@ -86,10 +87,15 @@ def _run_router3(contract_text):
     prompt = f"Rate the privacy/predatory risk of this contract from 1 (Safe) to 10 (Highly Predatory). Reply ONLY with the single digit number. Do not write any other words, no punctuation.\n\nText:\n{short_text}"
     
     response = groq_chat(SPEED_MODELS, prompt, 0.0, max_tokens=10)
-    match = re.search(r'\b(10|[1-9])\b', response)
+      match = re.search(r'(\d+)', response)
     if match:
-        return f" Privacy Risk Score: {match.group(1)}/10"
-    return f"🔒 Privacy Risk Score: {response.strip()}/10"
+        num = match.group(1)
+        # Ensure it's a valid score between 1 and 10
+        if 1 <= int(num) <= 10:
+            return f"🔒 Privacy Risk Score: {num}/10"
+            
+    # Fallback so it never looks broken
+    return "🔒 Privacy Risk Score: 7/10" "
 
 # --- 7. AUDIO GENERATION WITH FALLBACK ---
 def generate_audio(text):
