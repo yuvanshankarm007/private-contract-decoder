@@ -1,267 +1,190 @@
-"""
-Private Contract & Lease Decoder
-Hacktoberfest 2026 (#hf26challenge #hacktoberfest)
-
-Architecture:
-  - Router 1 (Groq, deep):   red-flag legal analysis
-  - Router 2 (Groq, speed):  negotiation email draft
-  - Router 3 (Groq):      privacy risk score 
-  All three fire in parallel threads with hard timeouts and a 10s score budget.
-  Self-healing model chains hop automatically across deprecated/congested models.
-  Results are cached; providers are warmed at boot; audio falls back to free gTTS.
-
-Categories: Best Use of Gemma / Render / ElevenLabs / Sentry / GitHub Copilot
-"""
-
 import os
 import re
 import time
 import tempfile
-import threading
-from concurrent.futures import ThreadPoolExecutor
 import gradio as gr
-from groq import Groq
-from dotenv import load_dotenv
-from pypdf import PdfReader
-from docx import Document
-from google import genai
-from google.genai import types
-from elevenlabs.client import ElevenLabs
-from gtts import gTTS
 import sentry_sdk
+from groq import Groq
+from concurrent.futures import ThreadPoolExecutor
+from gtts import gTTS
+import PyPDF2
+import docx
 
-# ==========================================
-# 1. INITIALIZATION & ENVIRONMENT
-# ==========================================
-load_dotenv()  # Only for local testing; Render uses real env vars
-
-MAX_CONTRACT_CHARS = 12000
-
-sentry_dsn = os.environ.get("SENTRY_DSN")
-if sentry_dsn:
-    sentry_sdk.init(dsn=sentry_dsn, traces_sample_rate=1.0)
-    print("✅ Sentry connected")
+# --- 1. ENVIRONMENT & SENTRY SETUP ---
+sentry_sdk.init(
+    dsn=os.environ.get("SENTRY_DSN"),
+    traces_sample_rate=1.0,
+)
 
 groq_key = os.environ.get("GROQ_API_KEY")
+elevenlabs_key = os.environ.get("ELEVENLABS_API_KEY")
+
+# --- 2. API CLIENTS ---
+# Timeout set to 10s to prevent the 190s hang
 client_groq = Groq(api_key=groq_key, timeout=10.0, max_retries=1) if groq_key else None
 print("✅ Groq key loaded" if client_groq else "❌ GROQ_API_KEY missing")
 
-google_key = os.environ.get("GOOGLE_API_KEY")
-client_google = genai.Client(api_key=google_key, http_options=types.HttpOptions(timeout=15000)) if google_key else None
-print("✅ Google key loaded" if client_google else "❌ GOOGLE_API_KEY missing")
-
-eleven_key = os.environ.get("ELEVENLABS_API_KEY")
-client_eleven = ElevenLabs(api_key=eleven_key) if eleven_key else None
-print("✅ ElevenLabs key loaded" if client_eleven else "⚠️ ElevenLabs missing (free gTTS fallback active)")
-
-# SELF-HEALING MODEL ROUTERS (fast first, smart fallbacks; names verified live)
-# The NEW Groq model IDs (replacing the decommissioned ones)
-# EXACT IDs from Groq Playground dropdown
+# --- 3. MODEL CONFIGURATION (The exact IDs from your Groq Console) ---
 DEEP_MODELS = ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
-SPEED_MODELS = ["openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
-GEMINI_MODELS = ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"]
+SPEED_MODELS = ["openai/gpt-oss-20b"]
 
+# --- 4. CACHING FOR INSTANT REPEAT RESULTS ---
 _RESPONSE_CACHE = {}
 
-# ==========================================
-# 2. HELPER FUNCTIONS
-# ==========================================
-def groq_chat(model_list, prompt, temperature, max_tokens=None):
-    """Tries each Groq model until one works."""
-    last_error = None
-    for model_name in model_list:
-        try:
-            res = client_groq.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temperature,
-                max_tokens=max_tokens
-            )
-            return res.choices[0].message.content
-        except Exception as e:
-            last_error = e
-            continue
-    raise last_error
-
-def _extract_text(resp):
-    """Extracts visible text from a Google response; '' if none (never dumps repr)."""
-    txt = getattr(resp, "text", None)
-    if txt:
-        return txt.strip()
-    txt = getattr(resp, "output_text", None)
-    if txt:
-        return txt.strip()
-    out = getattr(resp, "output", None)
-    if out:
-        chunks = []
-        for item in out:
-            for part in (getattr(item, "content", None) or []):
-                t = getattr(part, "text", None)
-                if t:
-                    chunks.append(t)
-        if chunks:
-            return "\n".join(chunks).strip()
-    return ""
-
-def _clean_score(raw):
-    """Pulls a single 1-10 digit out of any model reply."""
-    m = re.search(r'\b(10|[1-9])\b', raw or "")
-    return m.group(1) if m else None
-
-def extract_text_from_file(file):
-    if file is None: return ""
-    file_path = file.name if hasattr(file, 'name') else file
-    ext = file_path.split('.')[-1].lower()
+# --- 5. HELPER FUNCTIONS ---
+def extract_text_from_file(file_path):
+    """Extracts text from PDF, DOCX, or TXT files."""
+    if not file_path:
+        return ""
+    ext = os.path.splitext(file_path.name)[1].lower()
     try:
-        if ext == 'pdf':
-            reader = PdfReader(file_path)
-            return "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
-        elif ext == 'docx':
-            doc = Document(file_path)
-            return "\n".join([p.text for p in doc.paragraphs])
-        elif ext == 'txt':
-            with open(file_path, 'r', encoding='utf-8') as f:
+        if ext == '.pdf':
+            with open(file_path.name, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                return "".join([page.extract_text() for page in reader.pages if page.extract_text()])
+        elif ext == '.docx':
+            doc = docx.Document(file_path.name)
+            return "\n".join([para.text for para in doc.paragraphs])
+        else: # TXT
+            with open(file_path.name, 'r', encoding='utf-8') as f:
                 return f.read()
-        return "⚠️ Unsupported file type."
     except Exception as e:
-        return f"⚠️ Error reading file: {e}"
+        return f"Error reading file: {e}"
 
-def create_export_file(analysis, email, score):
-    content = f"=== PRIVACY RISK SCORE ===\n{score}\n\n=== CONTRACT ANALYSIS ===\n\n{analysis}\n\n\n=== DRAFT NEGOTIATION EMAIL ===\n\n{email}"
-    with tempfile.NamedTemporaryFile(delete=False, suffix="_contract_analysis.txt", mode='w', encoding='utf-8') as f:
-        f.write(content)
-        return f.name
-
-def generate_audio(text):
-    if not text or "Router" in text or "Failed" in text:
-        return None
-    if client_eleven:
+def groq_chat(models, prompt, temp, max_tokens):
+    """Iterates through fallback models until one works."""
+    for model in models:
         try:
-            audio = client_eleven.generate(text=text, voice="Rachel", model="eleven_multilingual_v2")
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
-                for chunk in audio:
-                    f.write(chunk)
-                return f.name
+            response = client_groq.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temp,
+                max_tokens=max_tokens,
+                timeout=10.0
+            )
+            return response.choices[0].message.content
         except Exception as e:
-            print(f"ElevenLabs failed ({e}), using free gTTS fallback")
-    try:
-        tts = gTTS(text=text, lang="en")
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as f:
-            tts.save(f.name)
-            return f.name
-    except Exception as e:
-        print(f"Audio error: {e}")
-        return None
+            print(f"Model {model} failed: {e}")
+            continue
+    raise ValueError("All Groq models failed.")
 
-# ==========================================
-# 3. ROUTERS (PARALLEL + DEADLINED + CACHED)
-# ==========================================
-def _safe(fn, label):
-    def wrapper(*args):
-        try:
-            return fn(*args)
-        except Exception as e:
-            return f"❌ {label} Failed: {e}"
-    return wrapper
-
+# --- 6. THE THREE ROUTERS ---
 def _run_router1(contract_text, user_role):
-    deep_prompt = f"You are an expert legal assistant. Analyze this contract for a {user_role}. Identify red flags, hidden fees, unfair clauses. Use bullet points and emojis. MAX 5 bullets, under 150 words.\n\nText:\n{contract_text}"
-    if client_groq is None: raise ValueError("GROQ_API_KEY missing")
-    return groq_chat(DEEP_MODELS, deep_prompt, 0.3, max_tokens=450)
+    """Deep analysis for Red Flags."""
+    prompt = f"You are an expert legal assistant. Analyze this contract for a {user_role}. Identify red flags, hidden fees, unfair clauses. Use bullet points and emojis. MAX 5 bullets, under 150 words.\n\nText:\n{contract_text}"
+    return groq_chat(DEEP_MODELS, prompt, 0.3, max_tokens=450)
 
 def _run_router2(contract_text, user_role):
-    speed_prompt = f"You are a professional negotiator. Read this {user_role} contract, pick the 2-3 most unfair terms, and draft a short, polite, professional email (under 100 words) asking to revise them. Do not sound aggressive.\n\nText:\n{contract_text}"
-    if client_groq is None: raise ValueError("GROQ_API_KEY missing")
-    return groq_chat(SPEED_MODELS, speed_prompt, 0.5, max_tokens=250)
+    """Drafting the negotiation email (Increased tokens to 500 so it doesn't cut off)."""
+    prompt = f"You are a professional negotiator. Read this {user_role} contract, pick the 2-3 most unfair terms, and draft a short, polite, professional email (under 150 words) asking to revise them. Do not sound aggressive.\n\nText:\n{contract_text}"
+    return groq_chat(SPEED_MODELS, prompt, 0.5, max_tokens=500)
 
 def _run_router3(contract_text):
-    """Pure Groq scoring for maximum speed."""
-    score_prompt = f"Rate the privacy risk of this contract from 1 (Safe) to 10 (Highly Predatory). Reply ONLY with the number.\n\n{contract_text}"
+    """Fast scoring with strict regex extraction."""
+    # Truncate to 1500 chars to ensure it finishes in <2 seconds
+    short_text = contract_text[:1500] 
+    prompt = f"Rate the privacy/predatory risk of this contract from 1 (Safe) to 10 (Highly Predatory). Reply ONLY with the single digit number. Do not write any other words, no punctuation.\n\nText:\n{short_text}"
+    
+    response = groq_chat(SPEED_MODELS, prompt, 0.0, max_tokens=10)
+    match = re.search(r'\b(10|[1-9])\b', response)
+    if match:
+        return f" Privacy Risk Score: {match.group(1)}/10"
+    return f"🔒 Privacy Risk Score: {response.strip()}/10"
+
+# --- 7. AUDIO GENERATION WITH FALLBACK ---
+def generate_audio(text):
+    """Tries ElevenLabs, falls back to free gTTS."""
     try:
-        num = _clean_score(groq_chat(SPEED_MODELS, score_prompt, 0.0, max_tokens=5))
-        if num:
-            return f"🔒 Privacy Risk Score: {num}/10"
+        if elevenlabs_key:
+            # Simplified ElevenLabs call (adjust if using specific SDK version)
+            from elevenlabs import generate, save
+            audio = generate(text=text, voice="Rachel", model="eleven_multilingual_v2")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+                save(audio, tmp.name)
+                return tmp.name
     except Exception as e:
-        print(f"Score failed: {e}")
-    return "❌ Score Failed"
+        print(f"ElevenLabs failed, using gTTS: {e}")
+    
+    # Free gTTS Fallback
+    tts = gTTS(text=text, lang='en')
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+        tts.save(tmp.name)
+        return tmp.name
 
+# --- 8. MAIN PROCESSING PIPELINE ---
 @sentry_sdk.trace
-def process_contract(uploaded_file, text_input, user_role):
-    contract_text = ""
-    if uploaded_file: contract_text += extract_text_from_file(uploaded_file)
-    if text_input: contract_text += "\n" + text_input
-    contract_text = contract_text.strip()[:MAX_CONTRACT_CHARS]
+def process_contract(role, file, text_input):
+    # 1. Get Text
+    contract_text = extract_text_from_file(file) if file else text_input
+    if not contract_text.strip():
+        return "Please upload a file or paste text.", "", "", None, None
 
-    if not contract_text:
-        return "⚠️ Please upload a file or paste text.", "No text provided.", "N/A", None
-
-    cache_key = (contract_text, user_role)
+    # 2. Check Cache
+    cache_key = hash(contract_text)
     if cache_key in _RESPONSE_CACHE:
-        red_flags, email_draft, privacy_score = _RESPONSE_CACHE[cache_key]
-        print("⚡ Cache hit - instant response")
-    else:
-        with ThreadPoolExecutor(max_workers=3) as ex:
-            f1 = ex.submit(_safe(_run_router1, "Router 1"), contract_text, user_role)
-            f2 = ex.submit(_safe(_run_router2, "Router 2"), contract_text, user_role)
-            f3 = ex.submit(_safe(_run_router3, "Score"), contract_text)
+        return _RESPONSE_CACHE[cache_key]
+
+    # 3. Run Routers in Parallel
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        f1 = executor.submit(_run_router1, contract_text, role)
+        f2 = executor.submit(_run_router2, contract_text, role)
+        f3 = executor.submit(_run_router3, contract_text)
+
+        try:
             red_flags = f1.result()
+        except Exception as e:
+            red_flags = f"❌ Router 1 Failed: {e}"
+            
+        try:
             email_draft = f2.result()
-            privacy_score = f3.result()
-        if len(_RESPONSE_CACHE) > 32:
-            _RESPONSE_CACHE.pop(next(iter(_RESPONSE_CACHE)))
-        _RESPONSE_CACHE[cache_key] = (red_flags, email_draft, privacy_score)
+        except Exception as e:
+            email_draft = f"❌ Router 2 Failed: {e}"
+            
+        try:
+            score = f3.result()
+        except Exception as e:
+            score = f"❌ Score Failed: {e}"
 
-    export_path = create_export_file(red_flags, email_draft, privacy_score)
-    return red_flags, email_draft, privacy_score, export_path
+    # 4. Generate Audio & Report
+    audio_path = generate_audio(email_draft) if "❌" not in email_draft else None
+    
+    report_content = f"ROLE: {role}\n\n--- RED FLAGS ---\n{red_flags}\n\n--- EMAIL DRAFT ---\n{email_draft}\n\n--- SCORE ---\n{score}"
+    with tempfile.NamedTemporaryFile(delete=False, mode='w', suffix=".txt") as tmp:
+        tmp.write(report_content)
+        report_path = tmp.name
 
-# ==========================================
-# 4. STARTUP WARM-UP (bounded by client timeouts)
-# ==========================================
-def _warmup():
-    try:
-        if client_groq:
-            groq_chat(SPEED_MODELS, "Say OK", 0.0, max_tokens=5)
-    except Exception:
-        pass
-    try:
-        if client_google:
-            client_google.models.generate_content(model=GEMMA_MODELS[0], contents="Reply 1", config=types.GenerateContentConfig(max_output_tokens=64))
-    except Exception:
-        pass
+    # 5. Save to Cache & Return
+    result = (score, red_flags, email_draft, report_path, audio_path)
+    _RESPONSE_CACHE[cache_key] = result
+    return result
 
-threading.Thread(target=_warmup, daemon=True).start()
-
-# ==========================================
-# 5. GRADIO UI
-# ==========================================
-with gr.Blocks(title="Private Contract Decoder", theme=gr.themes.Soft()) as demo:
-    gr.Markdown("# 🛡️ Private Contract & Lease Decoder")
+# --- 9. GRADIO UI (Matching your screenshots exactly) ---
+with gr.Blocks(theme=gr.themes.Soft(primary_hue="indigo")) as demo:
+    gr.Markdown("# ️ Private Contract & Lease Decoder")
     gr.Markdown("Upload a file or paste text. Get AI analysis, a negotiation email, and a privacy score. **100% Private.**")
-    gr.Markdown("⚖️ Educational tool — not legal advice.")
+    gr.Markdown("⚖️ *Educational tool — not legal advice.*")
 
     with gr.Row():
         with gr.Column():
-            role_dropdown = gr.Dropdown(["Freelancer", "Tenant", "Small Business Owner"], label="Select Your Role", value="Freelancer")
+            role_dropdown = gr.Dropdown(["Freelancer", "Tenant", "Employee", "Client"], label="Select Your Role", value="Freelancer")
             file_input = gr.File(label="Upload Contract (PDF, DOCX, TXT)", file_types=['.pdf', '.docx', '.txt'])
-            text_input = gr.Textbox(label="Or Paste Text Here", lines=5)
-            run_btn = gr.Button("🔍 Analyze & Draft", variant="primary")
-
+            text_input = gr.Textbox(label="Or Paste Text Here", lines=10, placeholder="Paste your contract text here...")
+            analyze_btn = gr.Button("🔍 Analyze & Draft", variant="primary", size="lg")
+            
         with gr.Column():
-            score_output = gr.Textbox(label=" Privacy Risk Score", lines=1)
-            deep_output = gr.Textbox(label="🧠 Router 1: Red Flags", lines=8)
-            speed_output = gr.Textbox(label="✉️ Router 2: Email Draft", lines=8)
-            export_output = gr.File(label="⬇️ Download Report (.txt)", interactive=False)
+            score_output = gr.Textbox(label="Privacy Risk Score", lines=1)
+            red_flags_output = gr.Textbox(label="🧠 Router 1: Red Flags", lines=8)
+            email_output = gr.Textbox(label="📧 Router 2: Email Draft", lines=8)
+            report_output = gr.File(label="Download Report (.txt)")
+            audio_btn = gr.Button("🔊 Read Email Aloud (ElevenLabs)", variant="secondary")
+            audio_output = gr.Audio(label="Audio Draft", type="filepath")
 
-    with gr.Row():
-        speak_btn = gr.Button("🔊 Read Email Aloud (ElevenLabs)", variant="secondary")
-        audio_output = gr.Audio(label="Audio Draft", type="filepath", autoplay=False)
+    analyze_btn.click(
+        fn=process_contract,
+        inputs=[role_dropdown, file_input, text_input],
+        outputs=[score_output, red_flags_output, email_output, report_output, audio_output]
+    )
 
-    run_btn.click(fn=process_contract, inputs=[file_input, text_input, role_dropdown], outputs=[deep_output, speed_output, score_output, export_output])
-    speak_btn.click(fn=generate_audio, inputs=speed_output, outputs=audio_output)
-
-# ==========================================
-# 6. LAUNCH
-# ==========================================
+# --- 10. LAUNCH ---
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 7860))
-    demo.launch(server_name="0.0.0.0", server_port=port)
+    demo.launch(server_name="0.0.0.0", server_port=int(os.environ.get("PORT", 7860)))
