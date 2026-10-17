@@ -5,7 +5,7 @@ Hacktoberfest 2026 (#hf26challenge #hacktoberfest)
 Architecture:
   - Router 1 (Groq, deep):   red-flag legal analysis
   - Router 2 (Groq, speed):  negotiation email draft
-  - Router 3 (Gemma 4):      privacy risk score (Gemini + Groq fallbacks)
+  - Router 3 (Groq):      privacy risk score 
   All three fire in parallel threads with hard timeouts and a 10s score budget.
   Self-healing model chains hop automatically across deprecated/congested models.
   Results are cached; providers are warmed at boot; audio falls back to free gTTS.
@@ -55,8 +55,9 @@ client_eleven = ElevenLabs(api_key=eleven_key) if eleven_key else None
 print("✅ ElevenLabs key loaded" if client_eleven else "⚠️ ElevenLabs missing (free gTTS fallback active)")
 
 # SELF-HEALING MODEL ROUTERS (fast first, smart fallbacks; names verified live)
-DEEP_MODELS = ["llama3-70b-8192"]
-SPEED_MODELS = ["llama3-8b-8192"]
+# The NEW Groq model IDs (replacing the decommissioned ones)
+DEEP_MODELS = ["llama-3.3-70b-versatile"]
+SPEED_MODELS = ["llama-3.1-8b-instant"]
 GEMINI_MODELS = ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"]
 
 _RESPONSE_CACHE = {}
