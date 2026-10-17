@@ -55,9 +55,8 @@ client_eleven = ElevenLabs(api_key=eleven_key) if eleven_key else None
 print("✅ ElevenLabs key loaded" if client_eleven else "⚠️ ElevenLabs missing (free gTTS fallback active)")
 
 # SELF-HEALING MODEL ROUTERS (fast first, smart fallbacks; names verified live)
-DEEP_MODELS = ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "llama-3.3-70b-versatile"]
-SPEED_MODELS = ["llama-3.1-8b-instant", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"]
-GEMMA_MODELS = ["gemma-3-4b-it", "gemma-4-26b-a4b-it", "gemma-4-31b-it"]
+DEEP_MODELS = ["llama-3.3-70b-versatile"]
+SPEED_MODELS = ["llama-3.1-8b-instant"]
 GEMINI_MODELS = ["gemini-3.8-flash", "gemini-3.1-flash-lite", "gemini-flash-latest"]
 
 _RESPONSE_CACHE = {}
