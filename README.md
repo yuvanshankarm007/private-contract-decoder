@@ -4,7 +4,7 @@ A fast, private, and free AI tool that acts as a first-pass legal reviewer. Uplo
 
 Built for students, freelancers, and tenants who need to verify documents before signing but can't afford a $300/hr lawyer.
 
- **Live Demo:** [Insert Your Render URL Here]
+
 
 ## ✨ Features
 
@@ -33,9 +33,4 @@ The app is built on a resilient, parallel architecture designed to survive free-
 - **Observability:** Sentry
 - **Hosting:** Render
 
-## 🚀 Local Setup
 
-### 1. Clone the repository
-```bash
-git clone https://github.com/yuvanshankarm007/private-contract-decoder.git
-cd private-contract-decoder
